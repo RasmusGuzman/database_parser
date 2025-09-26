@@ -205,7 +205,7 @@ class SPIMEXParserService:
             logger.info(f"Всего страниц для обработки: {total_pages}")
 
 #            for page in range(1, total_pages + 1):
-            for page in range(11):
+            for page in range(11):  # Для теста, потом заменить на (1, total_pages + 1)
 
                 try:
                     logger.info(f"Обработка страницы {page}/{total_pages}")
