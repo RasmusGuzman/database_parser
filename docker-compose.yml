@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16
+    container_name: my-postgres-spimex
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: spimexdata
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    restart: always
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

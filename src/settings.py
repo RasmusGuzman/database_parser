@@ -6,9 +6,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATE_FORMAT = "%Y-%m-%d"
 TODAY_DATE = datetime.now().strftime(DATE_FORMAT)
 
-POSTGRES_SYNC_URL = (
-    f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+
+POSTGRES_ASYNC_URL = (
+    f"postgresql+asyncpg://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 )
-POSTGRES_ASYNC_URL = POSTGRES_SYNC_URL.replace(
-    'postgresql', 'postgresql+asyncpg'
+
+POSTGRES_SYNC_URL = POSTGRES_ASYNC_URL.replace (
+    'postgresql+asyncpg', 'postgresql'
 )
