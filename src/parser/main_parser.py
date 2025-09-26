@@ -204,12 +204,9 @@ class SPIMEXParserService:
 
             logger.info(f"Всего страниц для обработки: {total_pages}")
 
-#            for page in range(1, total_pages + 1):
-            for page in range(11):  #Для теста, потом заменить на (1, total_pages + 1)
+            try:
 
-                try:
-                    logger.info(f"Обработка страницы {page}/{total_pages}")
-                    await self.process_page(session, page)
-                except Exception as e:
-                    logger.error(f"Ошибка при обработке страницы {page}: {e}")
-
+                tasks = [self.process_page(session, page) for page in range(1, total_pages + 1)]
+                await asyncio.gather(*tasks)
+            except Exception as e:
+                logger.error(f"Ошибка при обработке страниц")
