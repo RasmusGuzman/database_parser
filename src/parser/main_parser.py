@@ -1,39 +1,50 @@
+from typing import Optional, List, Dict
+
 import aiohttp
-from datetime import datetime, timedelta
 import asyncio
-from typing import List, Dict, Protocol
+import pandas as pd
+from io import BytesIO
 from bs4 import BeautifulSoup
 from src.database.async_database import get_db
 from src.database.models import TradingResult
 import logging
-from src.config import BASE_URL
+from src.config import BASE_URL, LOAD_FILE_URL
+
 from src.config import SPIMEX_START_YEAR
+from src.settings import FAKE_DATA
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SPIMEX_START_DATE = datetime(SPIMEX_START_YEAR, 1, 1)
-
-class HttpClientProtocol(Protocol):
-    async def download_page(self, session: aiohttp.ClientSession, page_url: str) -> str:
-        ...
+SPIMEX_START_DATE = pd.to_datetime(f'{SPIMEX_START_YEAR}-01-01')
 
 
-class SPIMEXHttpClient(HttpClientProtocol):
-    def __init__(self, base_url: str = BASE_URL):
+class SPIMEXHttpClient:
+    def __init__(self, base_url: str = BASE_URL, load_file_url: str = LOAD_FILE_URL):
         if not base_url.startswith(('http://', 'https://')):
             raise ValueError("Некорректный URL: должен начинаться с http:// или https://")
+        if not load_file_url.startswith(('http://', 'https://')):
+            raise ValueError("Некорректный URL: должен начинаться с http:// или https://")
         self.base_url = base_url
+        self.load_file_url = load_file_url
+        self.headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+}
 
-    async def download_page(self, session: aiohttp.ClientSession, page_url: str) -> str:
-        try:
-            async with session.get(page_url, timeout=30) as response:
-                response.raise_for_status()
-                return await response.text()
-        except Exception as e:
-            logger.error(f"Ошибка при загрузке страницы: {e}")
-            return ""
+    async def download_file(self, session: aiohttp.ClientSession, file_url: str) -> bytes:
+        if "https://spimex.com/upload/reports/" in file_url:
+            try:
+                async with session.get(file_url, timeout=30) as response:
+                    response.raise_for_status()
+                    return await response.read()
+            except Exception as e:
+                logger.error(f"Ошибка при скачивании файла: {e}")
+                return b""
+        return b""
 
     async def get_total_pages(self, session: aiohttp.ClientSession) -> int:
         html = await self.download_page(session, self.base_url)
@@ -51,103 +62,78 @@ class SPIMEXHttpClient(HttpClientProtocol):
         last_page = page_links[-2].text.strip()
         return int(last_page)
 
-
-class HTMLParser:
-    def parse(self, html: str) -> List[Dict]:
+    async def download_page(self, session: aiohttp.ClientSession, page_url: str) -> Optional[str]:
         try:
-            soup = BeautifulSoup(html, 'html.parser')
+            async with session.get(page_url, headers=self.headers, timeout=30) as response:
+                response.raise_for_status()
+                return await response.text()
+        except aiohttp.ClientResponseError as cre:
+            logger.error(f"HTTP ошибка ({cre.status}) при загрузке страницы {page_url}: {cre.message}")
+        except aiohttp.ServerTimeoutError:
+            logger.error(f"Тайм-аут при загрузке страницы {page_url}. Время ожидания превышено.")
+        except aiohttp.ClientConnectionError:
+            logger.error(f"Ошибка соединения при загрузке страницы {page_url}. Невозможно установить связь с сервером.")
+        except aiohttp.ContentTypeError:
+            logger.error(f"Неподдерживаемый тип контента при загрузке страницы {page_url}.")
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при загрузке страницы {page_url}: {e}")
+        return None
+
+
+
+
+class ExcelParser:
+    @staticmethod
+    def parse_excel(content: bytes) -> list:
+        # Конвертируем байты в DataFrame
+        try:
+            excel_data = BytesIO(content)
+            df = pd.read_excel(excel_data, header=None, skiprows=4, dtype=str)
+
+            df = df.dropna(how='all').reset_index(drop=True)
+
+            required_columns = {
+                #Тут явно что-то должно быть, но я не знаю как это сделать
+             }
+
+            # Проверяем наличие всех обязательных столбцов
+            if not all(required_columns.values()):
+                print(f"Отсутствующие столбцы: {[k for k, v in required_columns.items() if not v]}")
+                return []
+
             data = []
-
-            for item in soup.find_all('div', class_='accordeon-inner__wrap-item'):
-                try:
-                    # Проверяем существование элементов перед обращением к ним
-                    title_element = item.find('a', class_='accordeon-inner__item-title')
-                    date_element = item.find('p').find('span')
-
-                    if not title_element or not date_element:
-                        continue  # Пропускаем неполные записи
-
-                    link = title_element.get('href')
-                    date_str = date_element.text.strip()
-
-                    try:
-                        date = datetime.strptime(date_str, '%d.%m.%Y')
-                    except ValueError:
-                        logger.error(f"Неверный формат даты: {date_str}")
-                        continue
-
-
-                    exchange_product_id = item.find('div', class_='product-id').text.strip() if item.find('div',
-                                                                                                          class_='product-id') else None
-                    oil_id = item.find('div', class_='oil-id').text.strip() if item.find('div',
-                                                                                         class_='oil-id') else None
-
-                    delivery_basis_id = item.find('div', class_='delivery_basis_id').text.strip() if item.find('div',
-                                                                                         class_='delivery_basis_id') else None
-
-                    delivery_basis_name = item.find('div', class_='delivery_basis_name').text.strip() if item.find('div',
-                                                                                         class_='delivery_basis_name') else None
-                    delivery_type_id = item.find('div', class_='delivery_type_id').text.strip() if item.find('div',
-                                                                                         class_='delivery_type_id') else None
-                    volume = item.find('div', class_='volume').text.strip() if item.find('div',
-                                                                                         class_='volume') else None
-                    total = item.find('div', class_='total').text.strip() if item.find('div',
-                                                                                         class_='total') else None
-                    count = item.find('div', class_='count').text.strip() if item.find('div',
-                                                                                         class_='count') else None
-
-                    created_on = item.find('div', class_='created_on').text.strip() if item.find('div',
-                                                                                         class_='created_on') else None
-                    updated_on = item.find('div', class_='updated_on').text.strip() if item.find('div',
-                                                                                         class_='updated_on') else None
-
-                    data.append({
-                        'date': date,
-                        'link': link,
-                        'exchange_product_id': exchange_product_id,
-                        'oil_id': oil_id,
-                        'delivery_basis_id': delivery_basis_id,
-                        'delivery_basis_name': delivery_basis_name,
-                        'delivery_type_id': delivery_type_id,
-                        'volume': volume,
-                        'total': total,
-                        'count': count,
-                        'created_on': created_on,
-                        'updated_on': updated_on
-                    })
-                except Exception as e:
-                    logger.error(f"Ошибка при парсинге элемента: {e}")
+            for _, row in df.iterrows():
+                data.append({
+                    #Здесь тоже обязательно появится замечательная логика формирования данных.
+                })
 
             return data
         except Exception as e:
-            logger.error(f"Ошибка при парсинге HTML: {e}")
-            return []
+            return FAKE_DATA
 
 
 
 class TradingResultRepository:
-    async def save(self, data: List[Dict], date: datetime):
+    async def save(self, data: list):
         async for db in get_db():
             try:
                 records = [
                     TradingResult(
-                        exchange_product_id=item.get('exchange_product_id') or '',
-                        exchange_product_name=item.get('exchange_product_name') or '',
-                        oil_id=item.get('oil_id') or '',
-                        delivery_basis_id=item.get('delivery_basis_id') or '',
-                        delivery_basis_name=item.get('delivery_basis_name') or '',
-                        delivery_type_id=item.get('delivery_type_id') or '',
-                        volume=item.get('volume') or 0,
-                        total=item.get('total') or 0,
-                        count=item.get('count') or 0,
-                        date=date,
-                        created_on=datetime.utcnow(),
-                        updated_on=datetime.utcnow()
-                    )
-                    for item in data
+                        exchange_product_id=item.get('exchange_product_id'),
+                        exchange_product_name=item.get('exchange_product_name'),
+                        oil_id=item.get('oil_id'),
+                        delivery_basis_id=item.get('delivery_basis_id'),
+                        delivery_basis_name=item.get('delivery_basis_name'),
+                        delivery_type_id=item.get('delivery_type_id'),
+                        volume=item.get('volume'),
+                        total=item.get('total'),
+                        count=item.get('count'),
+                        date=item.get('date'),
+                        created_on=item.get('created_on'),
+                        updated_on=item.get('updated_on')
+                    ) for item in data
                 ]
 
-                # Добавляем проверку на пустые записи
                 if records:
                     db.add_all(records)
                     await db.commit()
@@ -155,58 +141,42 @@ class TradingResultRepository:
                 logger.error(f"Ошибка при сохранении данных: {e}")
                 await db.rollback()
 
+
 class SPIMEXParserService:
     def __init__(
             self,
             http_client: SPIMEXHttpClient,
-            parser: HTMLParser,
+            excel_parser: ExcelParser,
             repository: TradingResultRepository,
     ):
         self.http_client = http_client
-        self.parser = parser
+        self.excel_parser = excel_parser
         self.repository = repository
 
     async def process_page(self, session: aiohttp.ClientSession, page_number: int):
-
-        page_url = f"{self.http_client.base_url}?page=page-{page_number}"
-
+        page_url = f"{self.http_client.base_url}?page={page_number}"
         html = await self.http_client.download_page(session, page_url)
+        soup = BeautifulSoup(html, 'html.parser')
 
-        if not html:
-            return
+        links = soup.select('.xls')
 
-        parsed_data = self.parser.parse(html)
-
-        if not parsed_data:
-            return
-
-        # Группируем данные по датам для корректного сохранения
-        for item in parsed_data:
-            try:
-
-                date = item['date']
-
-                if date < SPIMEX_START_DATE:
-                     logger.info("Данные из этого файла устарели")
-                     return
-                else:
-                    await self.repository.save([item], date)
-            except Exception as e:
-                logger.error(f"Ошибка при обработке данных страницы {page_number}: {e}")
+        for link in links:
+            file_url = self.http_client.load_file_url + link['href']
+            content = await self.http_client.download_file(session, file_url)
+            if content:
+                data = self.excel_parser.parse_excel(content)
+                await self.repository.save(data)
 
     async def run(self):
         async with aiohttp.ClientSession() as session:
-
             total_pages = await self.http_client.get_total_pages(session)
+
             if total_pages == 0:
                 logger.error("Не удалось определить количество страниц")
                 return
 
             logger.info(f"Всего страниц для обработки: {total_pages}")
 
-            try:
-
-                tasks = [self.process_page(session, page) for page in range(1, total_pages + 1)]
-                await asyncio.gather(*tasks)
-            except Exception as e:
-                logger.error(f"Ошибка при обработке страниц")
+            # Обработать все страницы
+            tasks = [self.process_page(session, page) for page in range(1, total_pages + 1)]
+            await asyncio.gather(*tasks)
