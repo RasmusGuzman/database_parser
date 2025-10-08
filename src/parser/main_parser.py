@@ -1,18 +1,19 @@
+from concurrent.futures import ProcessPoolExecutor
 from typing import Optional, List, Dict
-
+from datetime import datetime
+import os
 import aiohttp
 import asyncio
 import pandas as pd
 from io import BytesIO
 from bs4 import BeautifulSoup
-from src.database.async_database import get_db
+from src.database.async_database import get_db, AsyncSessionLocal
 from src.database.models import TradingResult
 import logging
 from src.config import BASE_URL, LOAD_FILE_URL
 
 from src.config import SPIMEX_START_YEAR
-from src.settings import FAKE_DATA
-
+from src.settings import PARSER_DATE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,12 +36,14 @@ class SPIMEXHttpClient:
     "Pragma": "no-cache"
 }
 
+
     async def download_file(self, session: aiohttp.ClientSession, file_url: str) -> bytes:
-        if "https://spimex.com/upload/reports/" in file_url:
+        if "https://spimex.com/files/trades/result/upload/reports/" in file_url:
             try:
                 async with session.get(file_url, timeout=30) as response:
                     response.raise_for_status()
-                    return await response.read()
+                    data = await response.read()
+                    return data
             except Exception as e:
                 logger.error(f"Ошибка при скачивании файла: {e}")
                 return b""
@@ -80,37 +83,53 @@ class SPIMEXHttpClient:
         return None
 
 
-
-
 class ExcelParser:
     @staticmethod
     def parse_excel(content: bytes) -> list:
-        # Конвертируем байты в DataFrame
+
         try:
             excel_data = BytesIO(content)
-            df = pd.read_excel(excel_data, header=None, skiprows=4, dtype=str)
-
-            df = df.dropna(how='all').reset_index(drop=True)
-
-            required_columns = {
-                #Тут явно что-то должно быть, но я не знаю как это сделать
-             }
-
-            # Проверяем наличие всех обязательных столбцов
-            if not all(required_columns.values()):
-                print(f"Отсутствующие столбцы: {[k for k, v in required_columns.items() if not v]}")
-                return []
-
+            df = pd.read_excel(excel_data, skiprows=3, header=None)
             data = []
-            for _, row in df.iterrows():
-                data.append({
-                    #Здесь тоже обязательно появится замечательная логика формирования данных.
-                })
+            date_check = False
+            check_point = False
+            for row in df.iterrows():
+                check_row = row[1].to_dict()
+                if not date_check:
+                    date_str = check_row[1][-10:]
+                    date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+                    if date_obj >= PARSER_DATE:
+                        date_check = True
+                if date_check:
+                    if check_row[1] == 'Единица измерения: Метрическая тонна':
+                        check_point = True
+                    elif check_row[1] == 'Итого':
+                        check_point = False
+                    if check_point:
+                        try:
+                            count = int(check_row[14])
+                            record = {
+                                'exchange_product_id': str(check_row[1]),
+                                'exchange_product_name': str(check_row[2]),
+                                'oil_id': str(check_row[1])[:4],
+                                'delivery_basis_id': str(check_row[1])[4:7],
+                                'delivery_basis_name': str(check_row[3]),
+                                'delivery_type_id': str(check_row[1])[-1],
+                                'volume': check_row[4],
+                                'total': check_row[5],
+                                'count': count,
+                                'date': pd.Timestamp.now().date(),
+                                'created_on': pd.Timestamp.now(),
+                                'updated_on': pd.Timestamp.now()
+                            }
+                            data.append(record)
+                        except Exception:
+                            pass
 
             return data
         except Exception as e:
-            return FAKE_DATA
-
+            print(f"Ошибка при парсинге Excel: {e}")
+            return []
 
 
 class TradingResultRepository:
@@ -125,8 +144,8 @@ class TradingResultRepository:
                         delivery_basis_id=item.get('delivery_basis_id'),
                         delivery_basis_name=item.get('delivery_basis_name'),
                         delivery_type_id=item.get('delivery_type_id'),
-                        volume=item.get('volume'),
-                        total=item.get('total'),
+                        volume=float(item.get('volume')),
+                        total=float(item.get('total')),
                         count=item.get('count'),
                         date=item.get('date'),
                         created_on=item.get('created_on'),
@@ -160,12 +179,23 @@ class SPIMEXParserService:
 
         links = soup.select('.xls')
 
+        executor = ProcessPoolExecutor(max_workers=os.cpu_count())
+        loop = asyncio.get_event_loop()
+
+        results = []
         for link in links:
             file_url = self.http_client.load_file_url + link['href']
             content = await self.http_client.download_file(session, file_url)
+
             if content:
-                data = self.excel_parser.parse_excel(content)
-                await self.repository.save(data)
+                parsed_data = await loop.run_in_executor(executor, self.excel_parser.parse_excel, content)
+                results.extend(parsed_data)
+            await asyncio.sleep(0)
+            await self.repository.save(results)
+
+    async def limited_task(self, session, page, semaphore):
+        async with semaphore:
+            await self.process_page(session, page)
 
     async def run(self):
         async with aiohttp.ClientSession() as session:
@@ -177,6 +207,7 @@ class SPIMEXParserService:
 
             logger.info(f"Всего страниц для обработки: {total_pages}")
 
-            # Обработать все страницы
-            tasks = [self.process_page(session, page) for page in range(1, total_pages + 1)]
+            semaphore = asyncio.Semaphore(10)  # Устанавливаем предел на 10 параллельных задач
+
+            tasks = [self.limited_task(session, page, semaphore) for page in range(1, total_pages + 1)]
             await asyncio.gather(*tasks)

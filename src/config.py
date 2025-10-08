@@ -13,4 +13,4 @@ BASE_URL = os.getenv("BASE_URL")
 LOAD_FILE_URL = os.getenv("LOAD_FILE_URL")
 
 # Настройки парсинга
-SPIMEX_START_YEAR = int(os.getenv("SPIMEX_START_YEAR", 2023))
+SPIMEX_START_YEAR = os.getenv("SPIMEX_START_YEAR", '01.01.2023')

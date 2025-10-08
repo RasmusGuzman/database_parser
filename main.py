@@ -1,9 +1,9 @@
 import asyncio
-import time
+
 from src.database.async_database import init_db
 from src.parser.main_parser import SPIMEXParserService, ExcelParser, TradingResultRepository, SPIMEXHttpClient
 
-# Основной цикл выполнения
+
 async def main():
     await init_db()
 
@@ -18,10 +18,10 @@ async def main():
         print(f"Произошла ошибка при выполнении парсинга: {e}")
 
 
-
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+
     except KeyboardInterrupt:
         print("Парсинг прерван пользователем")
     except Exception as e:
